@@ -15,7 +15,7 @@ template<typename... Ts> struct type_list {};
 
 class dut_graph : public graph {
 public:
-  input_plio plio_data[L1Cfg::CAS_LENGTH];
+  input_plio plio_data[{{ graph_plan.graph_input_count }}];
 
 {% for L in layers %}
   {% set Lidx = loop.index %}
@@ -28,7 +28,7 @@ public:
   {% endfor %}
 {% endfor %}
 
-  output_plio plio_ofm[L{{ layers|length }}Cfg::CAS_NUM];
+  output_plio plio_ofm[{{ graph_plan.graph_output_count }}];
 
   top_graph<
   {%- for i in range(1, layers|length + 1) -%}
@@ -42,7 +42,7 @@ public:
   );
 
   dut_graph() {
-    for (int col = 0; col < L1Cfg::CAS_LENGTH; ++col) {
+    for (int col = 0; col < {{ graph_plan.graph_input_count }}; ++col) {
       plio_data[col] = input_plio::create(
         "PLIO_ifm_" + std::to_string(col),
         plio_{{ plio_bitwidth }}_bits,
@@ -71,7 +71,7 @@ public:
     }
 {% endfor %}
 
-    for (int ch = 0; ch < L{{ layers|length }}Cfg::CAS_NUM; ++ch) {
+    for (int ch = 0; ch < {{ graph_plan.graph_output_count }}; ++ch) {
       plio_ofm[ch] = output_plio::create(
         "PLIO_ofm_" + std::to_string(ch),
         plio_{{ plio_bitwidth }}_bits,
