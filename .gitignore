@@ -3,3 +3,9 @@ _version.py
 __pycache__
 examples/*
 src/aie4ml.egg*
+*.pdf
+tutorials/proj_hls*
+tutorials/proj_aie*
+tutorials/proj_aie_tuned/
+tutorials/tutorial_1.executed.ipynb
+scripts/

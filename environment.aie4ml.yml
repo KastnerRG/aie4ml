@@ -1,0 +1,19 @@
+name: aie4ml
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - jupyterlab
+  - notebook
+  - ipykernel
+  - numpy
+  - jinja2
+  - pip:
+      - tensorflow==2.15.1
+      - tf_keras==2.15.0
+      - keras==2.15.0
+      - absl-py~=1.4.0
+      - qkeras
+      - git+https://github.com/fastmachinelearning/hls4ml.git@main
+      - -e .
