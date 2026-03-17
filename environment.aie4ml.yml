@@ -1,3 +1,5 @@
+# Create with `./create_conda_env.sh` or `PYTHONNOUSERSITE=1 conda env create -f environment.aie4ml.yml`
+# so conda's pip phase does not resolve packages from ~/.local into this environment.
 name: aie4ml
 channels:
   - conda-forge
