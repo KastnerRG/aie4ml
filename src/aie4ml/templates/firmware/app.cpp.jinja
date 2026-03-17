@@ -1,5 +1,7 @@
 #include "parameters.h"
 #include "top_graph.h"
+#include <cstdlib>
+#include <fstream>
 
 using namespace adf;
 
@@ -118,7 +120,39 @@ int main() {
   {% endfor %}
 {% endfor %}
 
+#if defined(__AIESIM__)
+  event::handle latency_handle = event::start_profiling(
+    dut.plio_data[0],
+    dut.plio_ofm[0],
+    event::io_stream_start_difference_cycles
+  );
+#endif
+
   dut.run(N_ITER);
+  dut.wait();
+
+#if defined(__AIESIM__)
+  std::system("mkdir -p aiesimulator_output/data");
+  std::ofstream latency_report("aiesimulator_output/data/fifo_latency.json", std::ofstream::out | std::ofstream::trunc);
+  if (latency_report.is_open()) {
+    latency_report << "{\n";
+    latency_report << "  \"method\": \"adf.event.start_profiling\",\n";
+    latency_report << "  \"metric\": \"io_stream_start_difference_cycles\",\n";
+    latency_report << "  \"input_port\": \"PLIO_ifm_0\",\n";
+    latency_report << "  \"output_port\": \"PLIO_ofm_0\",\n";
+    if (latency_handle != event::invalid_handle) {
+      long long latency_cycles = event::read_profiling(latency_handle);
+      latency_report << "  \"valid\": true,\n";
+      latency_report << "  \"cycles\": " << latency_cycles << "\n";
+      event::stop_profiling(latency_handle);
+    } else {
+      latency_report << "  \"valid\": false,\n";
+      latency_report << "  \"error\": \"invalid_handle\"\n";
+    }
+    latency_report << "}\n";
+  }
+#endif
+
   dut.end();
   return 0;
 }

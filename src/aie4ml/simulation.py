@@ -1,6 +1,7 @@
 # Copyright 2025 D. Danopoulos, aie4ml
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import logging
 import re
 import subprocess
@@ -27,6 +28,7 @@ def read_aie_report(model_or_path: Union[object, str, Path]) -> Dict:
     output_dir = output_dir.resolve()
 
     ii_info = _analyze_aie_out_interval(output_dir)
+    latency_info = _analyze_aie_fifo_latency(output_dir)
     graph_info = _read_aie_graph_stats(output_dir)
     report = {}
 
@@ -42,6 +44,8 @@ def read_aie_report(model_or_path: Union[object, str, Path]) -> Dict:
         }
 
     report['output_interval'] = ii_info
+    if latency_info:
+        report['fifo_latency'] = latency_info
     report['AIE_info'] = graph_info
 
     return report
@@ -93,6 +97,40 @@ def _analyze_aie_out_interval(output_dir: Path) -> Dict:
         },
         'per_port': per_file,
     }
+
+
+def _analyze_aie_fifo_latency(output_dir: Path) -> Dict:
+    report_path = output_dir / 'aiesimulator_output' / 'data' / 'fifo_latency.json'
+    if not report_path.exists():
+        return {}
+
+    try:
+        payload = json.loads(report_path.read_text())
+    except Exception as e:
+        return {'error': f'Failed to parse latency report {report_path}: {e}'}
+
+    report = {
+        'method': payload.get('method', 'adf.event.start_profiling'),
+        'metric': payload.get('metric', 'io_stream_start_difference_cycles'),
+        'input_port': payload.get('input_port', 'PLIO_ifm_0'),
+        'output_port': payload.get('output_port', 'PLIO_ofm_0'),
+        'valid': bool(payload.get('valid', False)),
+        'source': str(report_path.relative_to(output_dir)),
+    }
+
+    if not report['valid']:
+        report['error'] = payload.get('error', 'invalid_handle')
+        return report
+
+    cycles = int(payload['cycles'])
+    report['cycles'] = cycles
+
+    freq_mhz = _read_aie_frequency_mhz(output_dir)
+    if freq_mhz is not None:
+        report['frequency_mhz'] = round(freq_mhz, 3)
+        report['ns'] = round(cycles * 1000.0 / freq_mhz, 3)
+
+    return report
 
 
 def _parse_timing(path: Path) -> List[float]:
@@ -482,3 +520,19 @@ def run_simulation_target(output_dir, make_target):
     result = subprocess.run(cmd, cwd=Path(output_dir), text=True)
     if result.returncode != 0:
         raise RuntimeError(f'Make target "{make_target}" failed in {output_dir}.')
+
+
+def _read_aie_frequency_mhz(output_dir: Path) -> Union[float, None]:
+    summary_path = output_dir / 'Work' / 'app.aiecompile_summary'
+    if summary_path.exists():
+        match = re.search(r'"frequency"\s*:\s*([0-9]+(?:\.[0-9]+)?)', summary_path.read_text())
+        if match:
+            return float(match.group(1))
+
+    sim_log = output_dir / 'AIESimulator.log'
+    if sim_log.exists():
+        match = re.search(r'AIE Frequency:\s*([0-9.eE+-]+)\s*Hz', sim_log.read_text())
+        if match:
+            return float(match.group(1)) / 1_000_000.0
+
+    return None
