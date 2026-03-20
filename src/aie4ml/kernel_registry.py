@@ -456,6 +456,8 @@ class DenseKernelVariant(KernelVariant):
             'io_tiling_dimension': io_tiling_dimension,
             'io_boundary_dimension': io_boundary_dimension,
             'slice_dimension': feat_dim,
+            'feature_dimension': feat_dim,
+            'independent_dimension': indep_dim,
         }
 
     def _describe_dense_ifm(
@@ -519,6 +521,8 @@ class DenseKernelVariant(KernelVariant):
             'io_tiling_dimension': io_tiling_dimension,
             'io_boundary_dimension': io_boundary_dimension,
             'slice_dimension': feat_dim,
+            'feature_dimension': feat_dim,
+            'independent_dimension': indep_dim,
         }
 
     def footprint(self, context: KernelPlacementContext) -> KernelFootprint:

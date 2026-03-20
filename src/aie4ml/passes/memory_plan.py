@@ -402,6 +402,9 @@ class _CodegenPlanner:
             'buffer_dimension': list(base['buffer_dimension']),
             'tiling_dimension': io_tile,
             'offset': [0 for _ in io_tile],
+            'slice_dimension': int(base['slice_dimension']),
+            'feature_dimension': int(base['feature_dimension']),
+            'independent_dimension': int(base['independent_dimension']),
         }
 
     def _graph_output_reader_descriptor(
@@ -428,6 +431,9 @@ class _CodegenPlanner:
             'tiling_dimension': io_tile,
             'offset': offset,
             'boundary_dimension': boundary,
+            'slice_dimension': int(base['slice_dimension']),
+            'feature_dimension': int(base['feature_dimension']),
+            'independent_dimension': int(base['independent_dimension']),
         }
 
     # ------------------------------------------------------------------

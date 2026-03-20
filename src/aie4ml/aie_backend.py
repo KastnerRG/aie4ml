@@ -76,8 +76,11 @@ class AIEBackend(Backend):
         memory_plan_flow = register_flow(
             'memory_plan', ['aie:materialize_memory_plan'], requires=[memtile_legalize_flow], backend=self.name
         )
+        compact_buffer_flow = register_flow(
+            'compact_batch', ['aie:compact_buffer_rank'], requires=[memory_plan_flow], backend=self.name
+        )
         template_flow = register_flow(
-            'apply_templates', self._get_layer_templates, requires=[memory_plan_flow], backend=self.name
+            'apply_templates', self._get_layer_templates, requires=[compact_buffer_flow], backend=self.name
         )
 
         self._default_flow = register_flow('project', None, requires=[template_flow], backend=self.name)

@@ -1,5 +1,6 @@
 """Optimizer passes specific to the AIE backend."""
 
+from .compact_buffer_rank import CompactBufferRank
 from .fanout_legalize import LegalizeFanoutEntries
 from .fold_transpose import FoldTransposeViews
 from .fuse_activation import FuseActivationCasts
@@ -16,6 +17,7 @@ __all__ = [
     'IntegerQuantizer',
     'FuseActivationCasts',
     'FoldTransposeViews',
+    'CompactBufferRank',
     'LegalizeFanoutEntries',
     'LegalizeMemtilePortLimits',
     'Resolve',

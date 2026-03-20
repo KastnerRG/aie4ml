@@ -1,0 +1,138 @@
+# Copyright 2025 D. Danopoulos, aie4ml
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+from math import prod
+
+from hls4ml.model.optimizer.optimizer import ModelOptimizerPass
+
+from ..ir import get_backend_context
+
+
+class CompactBufferRank(ModelOptimizerPass):
+    def __init__(self):
+        self.name = 'compact_buffer_rank'
+
+    def transform(self, model) -> bool:
+        ctx = get_backend_context(model)
+        plan = ctx.ir.physical.plan
+        buffers = plan['buffers']
+        changed = False
+
+        for buf in buffers:
+            rank = len(buf['dimension'])
+            if rank <= 2:
+                continue
+
+            desc_entries = [(endpoint['descriptor'], endpoint['source_type'] == 'plio') for endpoint in buf['writers']]
+            desc_entries += [(endpoint['descriptor'], endpoint['target_type'] == 'plio') for endpoint in buf['readers']]
+            descriptors = [desc for desc, _ in desc_entries]
+
+            axis_pairs = self._axis_pairs(descriptors, rank)
+            if axis_pairs is None:
+                continue
+
+            drop_axes = list(range(2, rank))
+            if not drop_axes:
+                continue
+
+            if not self._is_legal_to_collapse(desc_entries, drop_axes):
+                continue
+
+            old_buf_dim = [int(x) for x in buf['dimension']]
+            factor = int(prod(old_buf_dim[a] for a in drop_axes))
+
+            indep_dims = {indep for _feat, indep in axis_pairs}
+            if len(indep_dims) == 1:
+                merge_axis = next(iter(indep_dims))
+            elif factor == 1:
+                merge_axis = 1
+            else:
+                continue
+
+            buf['dimension'] = [old_buf_dim[0], old_buf_dim[1] * factor]
+            changed = True
+
+            for desc, is_graph_io in desc_entries:
+                self._collapse_descriptor(desc, drop_axes, factor, merge_axis=merge_axis, is_graph_io=is_graph_io)
+
+        return changed
+
+    def _axis_pairs(self, descriptors, rank: int):
+        pairs = []
+        for desc in descriptors:
+            if 'feature_dimension' not in desc or 'independent_dimension' not in desc:
+                return None
+
+            feat_dim = int(desc['feature_dimension'])
+            indep_dim = int(desc['independent_dimension'])
+
+            if feat_dim >= rank or indep_dim >= rank or feat_dim == indep_dim:
+                raise ValueError(f'Invalid axes for collapse: feat={feat_dim}, indep={indep_dim}, rank={rank}')
+
+            if {feat_dim, indep_dim} != {0, 1}:
+                return None
+
+            pairs.append((feat_dim, indep_dim))
+
+        return pairs
+
+    def _is_legal_to_collapse(self, desc_entries, drop_axes) -> bool:
+        for desc, is_graph_io in desc_entries:
+            buf = [int(x) for x in desc['buffer_dimension']]
+
+            for axis in drop_axes:
+                if int(desc['offset'][axis]) != 0:
+                    return False
+
+                if not is_graph_io and int(desc['tiling_dimension'][axis]) != 1:
+                    return False
+
+                if 'boundary_dimension' in desc and int(desc['boundary_dimension'][axis]) != int(buf[axis]):
+                    return False
+                if 'io_boundary_dimension' in desc and int(desc['io_boundary_dimension'][axis]) != int(buf[axis]):
+                    return False
+                if 'io_tiling_dimension' in desc and int(desc['io_tiling_dimension'][axis]) != int(buf[axis]):
+                    return False
+
+            if 'tile_traversal' in desc:
+                for step in desc['tile_traversal']:
+                    d = int(step['dimension'])
+                    if d in drop_axes:
+                        s = int(step['stride'])
+                        w = int(step['wrap'])
+                        if s != 1 or w != int(buf[d]):
+                            return False
+
+        return True
+
+    def _collapse_descriptor(self, desc, drop_axes, factor: int, merge_axis: int, is_graph_io: bool) -> None:
+        vector_fields = (
+            'buffer_dimension',
+            'tiling_dimension',
+            'offset',
+            'boundary_dimension',
+            'io_tiling_dimension',
+            'io_boundary_dimension',
+        )
+        for key in vector_fields:
+            if key in desc:
+                vec = [int(x) for x in desc[key]]
+                if key != 'tiling_dimension' or is_graph_io:
+                    vec[merge_axis] = int(vec[merge_axis]) * int(factor)
+                desc[key] = [vec[0], vec[1]]
+
+        if 'tile_traversal' in desc:
+            traversal = desc['tile_traversal']
+            compact = []
+            for step in traversal:
+                d = int(step['dimension'])
+                s = int(step['stride'])
+                w = int(step['wrap'])
+                if d in drop_axes:
+                    continue
+                if d == merge_axis:
+                    w = int(w) * int(factor)
+                compact.append({'dimension': d, 'stride': s, 'wrap': w})
+            desc['tile_traversal'] = compact
