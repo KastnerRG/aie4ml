@@ -33,8 +33,7 @@ def read_aie_report(model_or_path: Union[object, str, Path]) -> Dict:
     global_ii = ii_info.get('global', {})
     if global_ii and model is not None:
         ops_per_inf = compute_ops(model)
-        batch_size = _infer_batch_size(model)
-        total_ops = ops_per_inf * batch_size
+        total_ops = ops_per_inf
         report['throughput'] = {
             'Avg_GOPs': round((total_ops / global_ii['avg_ns']), 3),
             'Min_GOPs': round((total_ops / global_ii['min_ns']), 3),
@@ -139,24 +138,23 @@ def _convert_to_ns(value: int, unit: str) -> float:
 
 def compute_ops(model):
     ctx = get_backend_context(model)
+
     ops = 0
     for node in ctx.ir.logical:
-        if node.op_type == 'dense':
-            n_in = int(node.metadata['n_in'])
-            n_out = int(node.metadata['n_out'])
-            ops += 2 * n_in * n_out
+        if node.op_type != 'dense':
+            continue
+
+        n_in = int(node.metadata['n_in'])
+        n_out = int(node.metadata['n_out'])
+        out_shape = [int(x) for x in node.outputs[0].shape]
+
+        independent_extent = 1
+        for dim in out_shape[:-1]:
+            independent_extent *= int(dim)
+
+        ops += 2 * n_in * n_out * independent_extent
+
     return ops
-
-
-def _infer_batch_size(model) -> int:
-    ctx = get_backend_context(model)
-    inputs = ctx.ir.logical.graph_inputs()
-    if not inputs:
-        raise RuntimeError('Cannot infer batch size: logical graph has no inputs.')
-    shape = inputs[0].shape
-    if not shape:
-        raise RuntimeError('Cannot infer batch size: input tensor shape missing.')
-    return int(shape[0])
 
 
 @dataclass
