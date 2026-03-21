@@ -13,10 +13,9 @@
 
 ## Prerequisites
 
-- AMD Vitis 2025.1 or 2025.2 and a valid AIE tools license.
+- AMD Vitis 2025.2 and a valid AIE tools license.
 - Python 3.10+ and the latest version of [`hls4ml`](https://github.com/fastmachinelearning/hls4ml) package.
-
-
+> **Note (QKeras users):** Use TensorFlow 2.15 (Keras v2). Newer TensorFlow/Keras versions (Keras 3) are not compatible with QKeras.
 # Frontend Compatibility
 
 Operates on the intermediate model representation produced by hls4ml, therefore independent of the frontend (i.e., PyTorch, QKeras, etc.).
@@ -24,7 +23,7 @@ Operates on the intermediate model representation produced by hls4ml, therefore 
 # Installation
 
 ```bash
-pip install git+https://github.com/fastmachinelearning/hls4ml.git@main
+pip install hls4ml
 pip install aie4ml
 ```
 
