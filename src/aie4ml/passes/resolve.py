@@ -16,6 +16,20 @@ from .resolve_registry import LayerResolveContext, get_layer_policy, merge_confi
 log = logging.getLogger(__name__)
 
 
+def _quant_meta(node) -> dict:
+    """Build the quant precision dict from a node's tensor inputs/outputs."""
+    meta: dict = {}
+    if node.inputs:
+        meta['input_precision'] = node.inputs[0].precision
+    if node.outputs:
+        meta['output_precision'] = node.outputs[0].precision
+    if len(node.inputs) > 1 and node.inputs[1].is_parameter:
+        meta['weight_precision'] = node.inputs[1].precision
+    if len(node.inputs) > 2 and node.inputs[2].is_parameter:
+        meta['bias_precision'] = node.inputs[2].precision
+    return meta
+
+
 def resolve_aie_attributes(model, ctx, node) -> ResolvedAttributes:
     """Run the registered resolver pipeline for the given IR node."""
 
@@ -24,7 +38,6 @@ def resolve_aie_attributes(model, ctx, node) -> ResolvedAttributes:
     layer_name = node.metadata['source_layer']
     merged_cfg = merge_config_layers(model.config.config, layer_name, layer_class)
     attributes = ResolvedAttributes()
-    quant_meta = node.metadata['quant']
 
     context = LayerResolveContext(
         model=model,
@@ -34,7 +47,7 @@ def resolve_aie_attributes(model, ctx, node) -> ResolvedAttributes:
         layer_class=layer_class,
         policy=policy,
         config=merged_cfg,
-        quant=quant_meta,
+        quant=_quant_meta(node),
         device=ctx.device,
         global_config=model.config.get_config_value('AIEConfig', {}) or {},
         attributes=attributes,
@@ -86,7 +99,7 @@ class Resolve(ModelOptimizerPass):
                 node=node,
                 attributes=resolved,
                 device_generation=ctx.device.generation,
-                quant=node.metadata.get('quant', {}) or {},
+                quant=_quant_meta(node),
                 metadata=dict(node.metadata),
             )
             variant = self._registry.select(selection_ctx)

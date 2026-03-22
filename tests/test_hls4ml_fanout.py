@@ -6,6 +6,7 @@ import pytest
 BATCH = 1
 ITERATIONS = 5
 
+
 def _require_vitis():
     if 'XILINX_VITIS' not in os.environ:
         pytest.skip('AMD Vitis not found (XILINX_VITIS not set)')
@@ -94,7 +95,7 @@ def _make_aie_model(tmp_path, input_shape, cfg_layers, bits_in, bits_w, hidden, 
     )
     cfg = _make_cfg(hls4ml, qmodel, cfg_layers)
     tag = '1d' if len(input_shape) == 1 else f'nd{len(input_shape)}'
-    outdir = tmp_path / f"aie_fanout_{mode}_{tag}_h{hidden}_{_par_summary(cfg_layers)}"
+    outdir = tmp_path / f'aie_fanout_{mode}_{tag}_h{hidden}_{_par_summary(cfg_layers)}'
     aie_model = hls4ml.converters.convert_from_keras_model(
         qmodel,
         hls_config=cfg,
@@ -112,7 +113,10 @@ FANOUT_CASES = [
         'name': 'io_int8',
         'mode': 'io',
         'hidden': 256,
-        'cfg_layers': {'qfc1_branch1': {'cas_num': 2, 'cas_length': 4}, 'qfc1_branch2': {'cas_num': 2, 'cas_length': 4}},
+        'cfg_layers': {
+            'qfc1_branch1': {'cas_num': 2, 'cas_length': 4},
+            'qfc1_branch2': {'cas_num': 2, 'cas_length': 4},
+        },
         'nd_cases': [((384,), 8, 8)],
     },
     {
@@ -130,7 +134,10 @@ FANOUT_CASES = [
         'name': 'io_int16_small',
         'mode': 'io',
         'hidden': 16,
-        'cfg_layers': {'qfc1_branch1': {'cas_num': 1, 'cas_length': 2}, 'qfc1_branch2': {'cas_num': 1, 'cas_length': 2}},
+        'cfg_layers': {
+            'qfc1_branch1': {'cas_num': 1, 'cas_length': 2},
+            'qfc1_branch2': {'cas_num': 1, 'cas_length': 2},
+        },
         'nd_cases': [((8, 64), 16, 16)],
     },
     {
@@ -193,5 +200,5 @@ def test_aie_fanout_compile_x86_sim(tmp_path: Path, case_name, nd_case):
         np.testing.assert_equal(y_ref_0, y_aie_0)
         np.testing.assert_equal(y_ref_1, y_aie_1)
     else:
-        np.testing.assert_allclose(y_ref_0, y_aie_0, rtol=0.001, atol=0.001)
-        np.testing.assert_allclose(y_ref_1, y_aie_1, rtol=0.001, atol=0.001)
+        np.testing.assert_equal(y_ref_0, y_aie_0)
+        np.testing.assert_equal(y_ref_1, y_aie_1)

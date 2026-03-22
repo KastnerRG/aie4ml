@@ -6,7 +6,10 @@ from ..ir import TraitInstance, get_backend_context
 
 
 class FuseActivationCasts(ModelOptimizerPass):
-    _SUPPORTED = {'relu', 'linear'}
+    """Fuse relu into Dense (adds fused_activation trait) and contract linear activations out.
+
+    After this pass, no activation nodes remain in the IR and output tensors carry post-activation precision.
+    """
 
     def __init__(self):
         self.name = 'fuse_activation_casts'
@@ -21,23 +24,19 @@ class FuseActivationCasts(ModelOptimizerPass):
                 continue
 
             activation = (act_node.metadata.get('activation', '') or '').lower()
-            if activation not in self._SUPPORTED:
-                continue
 
-            in_tensor = act_node.inputs[0]
-            producer = in_tensor.producer
-            if producer is None or producer.op_type != 'dense' or len(producer.outputs) != 1:
-                continue
+            if activation == 'relu':
+                in_tensor = act_node.inputs[0]
+                producer = in_tensor.producer
+                if producer is None or producer.op_type != 'dense' or len(producer.outputs) != 1:
+                    continue
+                producer.add_trait(TraitInstance('fused_activation', {'activation': 'relu'}))
+                graph.remove_node(act_node, mode='contract')
+                changed = True
 
-            producer.add_trait(TraitInstance('fused_activation', {'activation': activation}))
-
-            act_quant = act_node.metadata.get('quant', {})
-            output_precision = act_quant['output_precision']
-            producer_quant = producer.metadata.setdefault('quant', {})
-            producer_quant['output_precision'] = output_precision
-
-            graph.remove_node(act_node, mode='contract')
-
-            changed = True
+            elif activation in ('linear', ''):
+                # Pure precision cast — eliminate regardless of what precedes it.
+                graph.remove_node(act_node, mode='contract')
+                changed = True
 
         return changed

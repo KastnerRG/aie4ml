@@ -103,7 +103,7 @@ class KernelVariant:
     def tiling_options(self, generation: str, input_bits: int, weight_bits: int):
         raise NotImplementedError
 
-    def pack(self, node, attrs, quant_weights, quant_bias, **kwargs):
+    def pack(self, inst: 'KernelInstance') -> Dict[str, Any]:
         raise NotImplementedError
 
     def describe_output_staging(
@@ -140,7 +140,9 @@ class KernelVariant:
     ) -> Dict[str, Dict[str, Dict[str, int]]]:
         ports = {'inputs': {}, 'outputs': {}}
 
-        for i, t in enumerate(context.node.inputs):
+        # Only runtime activation tensors get ports; parameter tensors don't
+        data_inputs = [t for t in context.node.inputs if not t.is_parameter]
+        for i, t in enumerate(data_inputs):
             ports['inputs'][t.name] = {'group': f'in{i+1}', 'count': cas_length}
 
         for i, t in enumerate(context.node.outputs):
@@ -350,17 +352,45 @@ class DenseKernelVariant(KernelVariant):
         return list(bucket.get((int(input_bits), int(weight_bits)), []))
 
     def pack(self, inst: KernelInstance) -> Dict[str, Any]:
+        from .passes.quant import _quantize_to_int
+
         attrs = inst.attributes
         parallel = attrs.parallelism
         tiling = attrs.tiling
         slices = attrs.slices
 
-        W = inst.node.artifacts['quant_weights']
-        b = inst.node.artifacts.get('quant_bias')
+        # inputs[0] = activation, inputs[1] = weight, inputs[2] = bias (optional)
+        input_tensor = inst.node.inputs[0]
+        weight_tensor = inst.node.inputs[1]
+        bias_tensor = inst.node.inputs[2] if len(inst.node.inputs) > 2 else None
+
+        wi = weight_tensor.precision
+        W = _quantize_to_int(
+            weight_tensor.data,
+            wi.frac,
+            wi.width,
+            signed=wi.signed,
+            rounding_mode=wi.rounding,
+            saturation_mode=wi.saturation,
+        )
+
+        if bias_tensor is not None:
+            bi = bias_tensor.precision
+            accum_frac = input_tensor.precision.frac + wi.frac
+            b = _quantize_to_int(
+                bias_tensor.data,
+                accum_frac,
+                32,
+                signed=bi.signed,
+                rounding_mode=bi.rounding,
+                saturation_mode=bi.saturation,
+            )
+        else:
+            b = None
 
         W = np.asarray(W)
         if W.ndim < 2:
-            raise ValueError(f'{inst.name}: quant_weights must have at least 2 dimensions, got {W.ndim}.')
+            raise ValueError(f'{inst.name}: weight matrix must have at least 2 dimensions, got {W.ndim}.')
         n_in = int(W.shape[-2])
         n_out = int(W.shape[-1])
 

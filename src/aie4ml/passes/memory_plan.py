@@ -142,12 +142,14 @@ class _CodegenPlanner:
         connections: List[_Connection] = []
         seen_outputs: set[str] = set()
 
-        # inputs
+        # inputs — skip parameter tensors
         for n in nodes:
             inst = self._kernel_inst(n)
             if not inst:
                 continue
             for t in getattr(n, 'inputs', []):
+                if t.is_parameter:
+                    continue
                 tname = t.name
                 cg = inst.config['parameters']['ports']['inputs'][tname]['group']
                 if tname in producers:

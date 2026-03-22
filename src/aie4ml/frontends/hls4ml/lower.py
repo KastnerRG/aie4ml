@@ -1,7 +1,7 @@
 # Copyright 2025 D. Danopoulos, aie4ml
 # SPDX-License-Identifier: Apache-2.0
 
-"""Lower hls4ml model graphs to the dedicated AIE IR."""
+"""Lower hls4ml model graphs to the AIE IR."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from typing import Any, Dict
 
 from hls4ml.model.optimizer.optimizer import ModelOptimizerPass
 
-from ..device_catalog import load_device_catalog
-from ..ir import (
+from ...device_catalog import load_device_catalog
+from ...ir import (
     BackendPolicies,
     LogicalIR,
     OpNode,
@@ -19,8 +19,9 @@ from ..ir import (
     TraitInstance,
     ensure_backend_context,
 )
-from ..ir.context import AIEBackendContext, DeviceSpec
-from .utils import is_pointwise_dense
+from ...ir.context import AIEBackendContext, DeviceSpec
+from ...passes.utils import is_pointwise_dense
+from .utils import _create_weight_tensors, _get_post_activation_precision, _precision_of
 
 
 class LowerToAieIr(ModelOptimizerPass):
@@ -41,31 +42,51 @@ class LowerToAieIr(ModelOptimizerPass):
 
         def _canon(shape):
             dims = [int(x) for x in shape]
-            if batch_included:
-                return tuple(dims)
-            return tuple([batch_size] + dims)
+            return tuple(dims) if batch_included else tuple([batch_size] + dims)
 
         if input_var.name not in graph.tensors:
-            graph.add_tensor(TensorVar(name=input_var.name, shape=input_var.shape))
+            graph.add_tensor(
+                TensorVar(
+                    name=input_var.name,
+                    shape=input_var.shape,
+                    precision=_precision_of(input_var),
+                )
+            )
 
         for layer in layers:
             var = model.output_vars[layer.name]
             if var.name not in graph.tensors:
-                graph.add_tensor(TensorVar(name=var.name, shape=_canon(var.shape)))
+                prec = _precision_of(var)
+                if layer.class_name == 'Dense' or is_pointwise_dense(layer):
+                    # hls4ml may remove the following linear activation before lowering,
+                    # leaving the Dense output var at accumulator precision.  Recover the
+                    # correct post-activation precision from the config if possible.
+                    override = _get_post_activation_precision(layer, model)
+                    if override is not None:
+                        prec = override
+                graph.add_tensor(
+                    TensorVar(
+                        name=var.name,
+                        shape=_canon(var.shape),
+                        precision=prec,
+                    )
+                )
 
         node_map: Dict[str, OpNode] = {}
+        param_tensors: Dict[str, tuple] = {}
         created_nodes = set()
 
         for layer in layers:
-            if layer.class_name == 'Activation' and self._is_identity_activation(layer):
-                continue
-
             node = OpNode(
                 name=f'{layer.name}_aie',
                 op_type=self._map_op_type(layer),
                 dialect=ctx.device.dialect,
             )
             self._collect_metadata(layer, node)
+
+            if node.op_type == 'dense':
+                weight_tv, bias_tv = _create_weight_tensors(layer, graph)
+                param_tensors[layer.name] = (weight_tv, bias_tv)
 
             var = model.output_vars[layer.name]
             tv = graph.tensors[var.name]
@@ -85,22 +106,22 @@ class LowerToAieIr(ModelOptimizerPass):
                 continue
 
             for src in layer.inputs:
-                if src == 'input':
-                    var = input_var
-                else:
-                    var = model.output_vars[src]
-
+                var = input_var if src == 'input' else model.output_vars[src]
                 tv = graph.tensors[var.name]
                 node.inputs.append(tv)
                 tv.consumers.append(node)
+
+            if layer.name in param_tensors:
+                weight_tv, bias_tv = param_tensors[layer.name]
+                node.inputs.append(weight_tv)
+                if bias_tv is not None:
+                    node.inputs.append(bias_tv)
 
             self._attach_traits(ctx, node, layer)
 
         return True
 
     def _collect_metadata(self, layer, node) -> None:
-        # legacy metadata (kept for transition)
-
         meta: Dict[str, Any] = {}
 
         if layer.class_name == 'Dense' or is_pointwise_dense(layer):
@@ -145,7 +166,6 @@ class LowerToAieIr(ModelOptimizerPass):
         device_entry = catalog.get(part_name, {}) or catalog.get(part_name.lower(), {})
         merged = dict(device_entry)
         merged.update(aie_cfg)
-
         if 'Generation' not in merged:
             merged['Generation'] = device_entry.get('Generation', '')
 
@@ -189,14 +209,8 @@ class LowerToAieIr(ModelOptimizerPass):
             if fused:
                 node.add_trait(TraitInstance('fused_activation', {'activation': fused}))
 
-    def _is_identity_activation(self, layer) -> bool:
-        act = (layer.get_attr('activation', '') or '').lower()
-        return act in ('', 'linear', 'identity')
-
     def _map_op_type(self, layer) -> str:
-        if layer.class_name == 'Dense':
-            return 'dense'
-        if is_pointwise_dense(layer):
+        if layer.class_name in ('Dense',) or is_pointwise_dense(layer):
             return 'dense'
         if layer.class_name == 'Transpose':
             return 'transpose'

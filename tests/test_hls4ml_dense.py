@@ -27,11 +27,11 @@ def _build_qkeras_mlp(qkeras, input_shape, in_features, hidden1, hidden2, out_fe
 
     assert int(input_shape[-1]) == int(in_features)
 
-    INT_BITS = 2
+    INT_BITS = 3
 
     q_in = quantized_bits(bits, INT_BITS)
-    q_w = quantized_bits(bits, 1, alpha=1)
-    q_b = quantized_bits(bits, 1, alpha=1)
+    q_w = quantized_bits(bits, 2, alpha=1)
+    q_b = quantized_bits(bits, 2, alpha=1)
 
     model = Sequential(
         [
@@ -164,12 +164,12 @@ def test_aie_compile_x86_sim_nd_input(tmp_path: Path, input_shape):
     B = 1
     N = 10
 
-    q_w = quantized_bits(bits, 1, alpha=1)
-    q_b = quantized_bits(bits, 1, alpha=1)
+    q_w = quantized_bits(bits, 2, alpha=1)
+    q_b = quantized_bits(bits, 2, alpha=1)
 
     qmodel = Sequential(
         [
-            QActivation(quantized_bits(bits, 2), name='input_quant', input_shape=input_shape),
+            QActivation(quantized_bits(bits, 3), name='input_quant', input_shape=input_shape),
             QDense(
                 N,
                 name='dense0',
@@ -181,10 +181,13 @@ def test_aie_compile_x86_sim_nd_input(tmp_path: Path, input_shape):
     )
     qmodel.compile(optimizer='adam', loss='mse')
 
+    cfg = hls4ml.utils.config_from_keras_model(qmodel, granularity='name')
+
     shape_tag = 'x'.join(str(d) for d in input_shape)
     outdir = tmp_path / f'aie_dense_nd_single_layer_{shape_tag}'
     aie_model = hls4ml.converters.convert_from_keras_model(
         qmodel,
+        hls_config=cfg,
         output_dir=str(outdir),
         backend='aie',
         project_name='proj_aie',
@@ -192,9 +195,6 @@ def test_aie_compile_x86_sim_nd_input(tmp_path: Path, input_shape):
         iterations=5,
     )
 
-    # NOTE: keep this test relaxed. In the 2D Dense path, hls4ml may widen
-    # inferred numeric types during parsing/lowering (e.g., 8-bit QKeras intent
-    # leading to wider IO precision such as 16-bit in generated types).
     aie_model.compile()
 
     x = (np.random.random((B, *input_shape)).astype('float32') * 2.0) - 1.0
@@ -203,7 +203,7 @@ def test_aie_compile_x86_sim_nd_input(tmp_path: Path, input_shape):
     y_aie = y_aie[:B]
 
     assert y_ref.shape == y_aie.shape
-    np.testing.assert_allclose(y_ref, y_aie, rtol=0.15, atol=0.15)
+    np.testing.assert_equal(y_ref, y_aie)
 
 
 # Future TODO

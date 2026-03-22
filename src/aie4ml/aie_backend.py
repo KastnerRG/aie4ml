@@ -3,10 +3,11 @@
 
 import copy
 import logging
+import os
 import subprocess
 from pathlib import Path
 
-from hls4ml.backends.backend import Backend
+from hls4ml.backends.backend import Backend, extract_optimizers_from_path
 from hls4ml.backends.fpga.fpga_backend import FPGABackend as _FPGABackendHelper
 from hls4ml.model.attributes import Attribute, ConfigurableAttribute
 from hls4ml.model.flow import register_flow
@@ -26,6 +27,17 @@ class AIEBackend(Backend):
         self.attribute_map = {}
         self._register_aie_layer_attributes()
         self._register_flows()
+
+    def _init_file_optimizers(self):
+        base = os.path.dirname(__file__)
+        result = {}
+        for subdir, mod_path in [
+            ('passes', 'aie4ml.passes'),
+            ('frontends/hls4ml', 'aie4ml.frontends.hls4ml'),
+        ]:
+            path = os.path.normpath(os.path.join(base, subdir))
+            result.update(extract_optimizers_from_path(path, mod_path, self))
+        return result
 
     def _register_aie_layer_attributes(self):
         dense_attrs = self.attribute_map.get(Dense, [])
@@ -53,8 +65,7 @@ class AIEBackend(Backend):
         initializers = self._get_layer_initializers()
         init_flow = register_flow('init_layers', initializers, requires=['optimize'], backend=self.name)
         lower_flow = register_flow('lower', ['aie:lower_to_aie_ir'], requires=[init_flow], backend=self.name)
-        quant_flow = register_flow('quantize', ['aie:integer_quantizer'], requires=[lower_flow], backend=self.name)
-        fuse_flow = register_flow('fuse', ['aie:fuse_activation_casts'], requires=[quant_flow], backend=self.name)
+        fuse_flow = register_flow('fuse', ['aie:fuse_activation_casts'], requires=[lower_flow], backend=self.name)
         fold_views_flow = register_flow(
             'fold_views', ['aie:fold_transpose_views'], requires=[fuse_flow], backend=self.name
         )

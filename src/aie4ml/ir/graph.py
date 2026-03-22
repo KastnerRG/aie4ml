@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 
-from ..aie_types import AIEDataType
+import numpy as np
+
+from ..aie_types import AIEDataType, QuantIntent
 
 if TYPE_CHECKING:  # pragma: no cover - runtime circular import guard
     from ..kernel_registry import KernelVariant
@@ -13,12 +15,22 @@ if TYPE_CHECKING:  # pragma: no cover - runtime circular import guard
 
 @dataclass
 class TensorVar:
-    """Logical tensor value with producer/consumer connectivity."""
+    """Logical tensor value with producer/consumer connectivity.
+
+    Parameter tensors (weights, biases) have data set and producer=None.
+    Activation tensors have data=None and a producer node.
+    """
 
     name: str
     shape: Tuple[int, ...]
+    precision: Optional[QuantIntent] = None
+    data: Optional[np.ndarray] = None
     producer: Optional['OpNode'] = None
     consumers: List['OpNode'] = field(default_factory=list)
+
+    @property
+    def is_parameter(self) -> bool:
+        return self.data is not None
 
 
 @dataclass
@@ -204,14 +216,11 @@ class LogicalIR:
             if not t.consumers and t.producer is None:
                 self.tensors.pop(t.name, None)
 
-    # TODO be careful with graph inputs/outputs when quant nodes are present
     def graph_inputs(self) -> List[TensorVar]:
-        """Tensors with no producer."""
-        return [t for t in self.tensors.values() if t.producer is None]
+        return [t for t in self.tensors.values() if t.producer is None and not t.is_parameter]
 
     def graph_outputs(self) -> List[TensorVar]:
-        """Tensors with no consumers."""
-        return [t for t in self.tensors.values() if not t.consumers]
+        return [t for t in self.tensors.values() if not t.consumers and not t.is_parameter]
 
     def __iter__(self):
         return iter(self.nodes)
