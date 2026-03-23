@@ -1,0 +1,86 @@
+SHELL := /bin/bash
+
+PROJ          ?= proj_aie_tuned
+APP_NAME      := app
+TRACE_WORKDIR := $(PROJ)/Work_trace
+TRACE_LIBADF  := $(PROJ)/libadf_trace.a
+TRACE_LOG     := $(PROJ)/trace.log
+
+SRC_DIR       := $(PROJ)/src
+KER_DIR       := $(SRC_DIR)/kernels
+WTS_DIR       := $(SRC_DIR)/weights
+CFG_DIR       := $(SRC_DIR)
+APP_CPP       := $(PROJ)/$(APP_NAME).cpp
+AIE_CFG       := $(PROJ)/aie.cfg
+
+KERNEL_SOURCES := $(shell find $(KER_DIR) -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) 2>/dev/null)
+KERNEL_INC_DIRS := $(shell find $(KER_DIR) -type d 2>/dev/null)
+MY_SOURCES    := $(APP_CPP) $(KERNEL_SOURCES)
+
+VITIS_HOME := $(strip $(shell VITIS_BIN="$$(command -v vitis 2>/dev/null)"; if [ -n "$$VITIS_BIN" ]; then dirname "$$(dirname "$$VITIS_BIN")"; fi))
+
+ifeq ($(strip $(VITIS_HOME)),)
+  $(error Unable to auto-detect Vitis installation. Ensure 'vitis' is on PATH or set VITIS_HOME manually.)
+endif
+
+PLATFORM_USE ?= xilinx_vek280_base_202520_1
+PLATFORM     ?= $(VITIS_HOME)/base_platforms/$(PLATFORM_USE)/$(PLATFORM_USE).xpfm
+
+ifeq ($(wildcard $(APP_CPP)),)
+  $(error Project '$(PROJ)' does not look like a generated tutorial AIE project. Expected $(APP_CPP))
+endif
+
+AIE_FLAGS_BASE := \
+  $(addprefix --include=,$(KERNEL_INC_DIRS)) --include=$(WTS_DIR) --include=$(CFG_DIR) \
+  --platform=$(PLATFORM) $(APP_CPP)
+
+AIE_TRACE_FLAGS := \
+  --aie.event-trace=runtime \
+  --aie.event-trace-port=plio \
+  --aie.trace-plio-width=64 \
+  --aie.num-trace-streams=4
+
+AIE_FLAGS_TRACE := $(AIE_FLAGS_BASE) \
+  --aie.workdir=$(TRACE_WORKDIR) \
+  --aie.output-archive=$(TRACE_LIBADF) \
+  $(AIE_TRACE_FLAGS)
+
+.PHONY: help trace-compile trace-sim trace-analyze trace-all trace-clean aiesim
+
+help:
+	@echo "Trace Makefile Usage:"
+	@echo "  make -f Makefile.trace PROJ=proj_aie trace-compile"
+	@echo "  make -f Makefile.trace PROJ=proj_aie_tuned trace-sim"
+	@echo "  make -f Makefile.trace PROJ=proj_aie_tuned trace-analyze"
+	@echo "  make -f Makefile.trace PROJ=proj_aie_tuned trace-all"
+	@echo ""
+	@echo "Targets:"
+	@echo "  trace-compile  - Build a traced AIE-sim package in \$$PROJ/Work_trace/"
+	@echo "  trace-sim      - Run traced AIE simulation for \$$PROJ"
+	@echo "  trace-analyze  - Open \$$PROJ trace results in Vitis Analyzer"
+	@echo "  trace-all      - Compile then run traced AIE simulation"
+	@echo "  aiesim         - Run the normal project Makefile AIE simulation"
+	@echo "  trace-clean    - Remove traced build and trace outputs for \$$PROJ"
+	@echo ""
+	@echo "Notes:"
+	@echo "  - Run this from tutorials/ after sourcing Vitis settings."
+	@echo "  - This is traced AIE simulation, not full XRT hw_emu."
+
+trace-compile: $(MY_SOURCES) $(AIE_CFG)
+	v++ --compile --config $(AIE_CFG) --mode aie --target=hw $(AIE_FLAGS_TRACE) |& tee $(TRACE_LOG)
+
+trace-sim:
+	cd $(PROJ) && aiesimulator --pkg-dir=./Work_trace --online -wdb -text |& tee -a trace.log
+
+trace-analyze:
+	cd $(PROJ) && vitis_analyzer aiesimulator_output/default.aierun_summary
+
+trace-all: trace-compile trace-sim
+
+aiesim:
+	$(MAKE) -C $(PROJ) aiesim
+
+trace-clean:
+	rm -rf $(TRACE_WORKDIR) $(TRACE_LIBADF) $(TRACE_LOG)
+	rm -rf $(PROJ)/aiesimulator_output* $(PROJ)/aiesimulator*.log
+	rm -rf $(PROJ)/function_wdb_dir $(PROJ)/trdata.aiesim $(PROJ)/.AIE_SIM_CMD_LINE_OPTIONS
