@@ -12,6 +12,14 @@ from aie4ml.simulation import read_aie_report
 from qkeras import QActivation, QDense, quantized_bits
 from tensorflow.keras.models import Sequential
 
+TILE_API_TILINGS = {
+    ("i8", "i8"): [(4, 8, 8), (2, 8, 8), (2, 16, 8), (4, 8, 4), (4, 16, 4), (4, 16, 8), (8, 8, 4), (8, 8, 8)],
+    ("i16", "i8"): [(4, 4, 8), (2, 8, 8), (4, 4, 4), (4, 8, 4), (8, 4, 4), (8, 4, 8)],
+    ("i8", "i16"): [(4, 4, 4), (4, 4, 8)],
+    ("i16", "i16"): [(4, 4, 4), (2, 4, 8), (4, 2, 8), (4, 4, 8), (8, 1, 8), (8, 2, 8)],
+}
+
+
 
 def seed_everything(seed=42):
     np.random.seed(seed)
@@ -80,10 +88,6 @@ def build_dense_aie_model(
     )
     aie_model.compile()
     return aie_model
-
-
-def tagged_output_dir(output_root, **tags):
-    return output_root / "_".join(f"{key}_{value}" for key, value in tags.items())
 
 
 def result_path(output_dir):
@@ -167,8 +171,67 @@ def sweep_factors(max_factor):
     return factors
 
 
+def api_tilings(dtype_pair, tile_m=None):
+    tilings = TILE_API_TILINGS[dtype_pair]
+    if tile_m is None:
+        return tilings
+    return [tiling for tiling in tilings if tiling[0] == tile_m]
+
+
+def valid_tile_sizes(feature_size, dtype_pair, axis, tile_m=None):
+    dim = {"k": 1, "n": 2}[axis]
+    api_sizes = {tiling[dim] for tiling in api_tilings(dtype_pair, tile_m=tile_m)}
+    return [
+        size
+        for size in range(1, feature_size + 1)
+        if feature_size % size == 0 and any(size % api_size == 0 for api_size in api_sizes)
+    ]
+
+
+def select_api_tiling(tile_k_size, tile_n_size, dtype_pair, tile_m=None):
+    matches = [
+        tiling
+        for tiling in api_tilings(dtype_pair, tile_m=tile_m)
+        if tile_k_size % tiling[1] == 0 and tile_n_size % tiling[2] == 0
+    ]
+    if not matches:
+        raise ValueError(
+            f"No API tiling matches tile_k_size={tile_k_size}, tile_n_size={tile_n_size}, dtype_pair={dtype_pair}, tile_m={tile_m}"
+        )
+    return max(matches, key=lambda tiling: (tiling[1] * tiling[2], tiling[1], tiling[2]))
+
+
 def tuple_labels(first_values, second_values):
     return [f"({first},{second})" for first, second in zip(first_values, second_values)]
+
+
+def common_tile_sizes(feature_size, dtype_pair, tile_m=None):
+    return sorted(set(valid_tile_sizes(feature_size, dtype_pair, "k", tile_m=tile_m)) & set(valid_tile_sizes(feature_size, dtype_pair, "n", tile_m=tile_m)))
+
+
+def choose_square_problem_size(feature_sizes, batch_sizes, dtype_pair, tile_m=None):
+    best = None
+    for batch in batch_sizes:
+        for size in feature_sizes:
+            tile_sizes = common_tile_sizes(size, dtype_pair, tile_m=tile_m)
+            candidate = (len(tile_sizes), size, -batch)
+            if best is None or candidate > best[0]:
+                best = (candidate, batch, size, tile_sizes)
+    if best is None or not best[3]:
+        raise ValueError(f"No valid problem size found for dtype_pair={dtype_pair}, tile_m={tile_m}")
+    _, batch, size, tile_sizes = best
+    return batch, size, size, tile_sizes
+
+
+def save_bar_csv(output_root, x_values, latencies_ns, metadata_rows):
+    np.save(output_root / "latencies_ns.npy", latencies_ns)
+    rows = ["x_value,latency_us,cas_length,cas_num,tile_m,tile_k,tile_n"]
+    for x_value, latency_ns, meta in zip(x_values, latencies_ns, metadata_rows):
+        latency_us = "nan" if np.isnan(latency_ns) else f"{latency_ns / 1000.0:.6f}"
+        rows.append(
+            f"{x_value},{latency_us},{meta.get('cas_length', '')},{meta.get('cas_num', '')},{meta['tile_m']},{meta['tile_k']},{meta['tile_n']}"
+        )
+    (output_root / "latencies_us.csv").write_text("\n".join(rows) + "\n")
 
 
 def save_heatmap_csv(output_root, header, x_labels, y_labels, latencies_ns):
@@ -178,6 +241,26 @@ def save_heatmap_csv(output_root, header, x_labels, y_labels, latencies_ns):
         values = ["nan" if np.isnan(value) else f"{value:.6f}" for value in row]
         rows.append(",".join([label, *values]))
     (output_root / "latencies_us.csv").write_text("\n".join(rows) + "\n")
+
+
+def plot_bar(output_png, x_labels, latencies_ns, x_title, y_title, title):
+    latencies_us = latencies_ns / 1000.0
+    heights = np.nan_to_num(latencies_us, nan=0.0)
+    colors = ["white" if np.isnan(value) else "tab:blue" for value in latencies_us]
+    fig, ax = plt.subplots(figsize=(10, 5))
+    bars = ax.bar(range(len(x_labels)), heights, color=colors, edgecolor="black")
+    ax.set_xticks(range(len(x_labels)), labels=x_labels, rotation=45, ha="right")
+    ax.set_xlabel(x_title)
+    ax.set_ylabel(y_title)
+    ax.set_title(title)
+    for bar, value in zip(bars, latencies_us):
+        label = "fail" if np.isnan(value) else f"{value:.2f}"
+        y = bar.get_height() if not np.isnan(value) else 0.0
+        ax.text(bar.get_x() + bar.get_width() / 2.0, y, label, ha="center", va="bottom", rotation=90)
+    fig.tight_layout()
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_png, dpi=200)
+    plt.show()
 
 
 def plot_heatmap(output_png, x_labels, y_labels, x_title, y_title, latencies_ns):

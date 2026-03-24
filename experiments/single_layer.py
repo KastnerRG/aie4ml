@@ -17,8 +17,8 @@ CAS_NUM = 1
 BATCH = 8
 ITERS = 1
 PLATFORM = "xilinx_vek280_base_202520_1"
-VITIS_SETTINGS = os.environ.get("VITIS_SETTINGS", "/tmp/tools/Xilinx/2025.2/Vitis/.settings64-Vitis.sh")
-OUTPUT_DIR = Path(__file__).resolve().parent / "runs" / "single_tile"
+VITIS_SETTINGS = os.environ.get("VITIS_SETTINGS", "/tools/Xilinx/Vivado/2025.2/Vitis/settings64.sh")
+OUTPUT_DIR = Path(__file__).resolve().parent / "runs" / f"single_tile__size_{BATCH}_{IN_FEATURES}_{OUT_FEATURES}"
 
 np.random.seed(42)
 tf.random.set_seed(42)
