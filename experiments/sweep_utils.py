@@ -41,17 +41,40 @@ def source_vitis(vitis_settings):
     os.environ["LD_LIBRARY_PATH"] = f"{env_prefix / 'lib'}:{os.environ.get('LD_LIBRARY_PATH', '')}".rstrip(":")
 
 
-def build_dense_model(in_features, out_features):
+def dtype_bits(dtype_name):
+    return int(dtype_name[1:])
+
+
+def dtype_frac(dtype_name):
+    return 2 if dtype_bits(dtype_name) <= 8 else 4
+
+
+def default_output_dtype(input_dtype, weight_dtype):
+    return {
+        ("i8", "i8"): "i8",
+        ("i16", "i8"): "i8",
+        ("i8", "i16"): "i8",
+        ("i16", "i16"): "i16",
+    }[(input_dtype, weight_dtype)]
+
+
+def build_dense_model(in_features, out_features, input_dtype="i8", weight_dtype="i8", output_dtype=None):
+    output_dtype = default_output_dtype(input_dtype, weight_dtype) if output_dtype is None else output_dtype
+    input_bits = dtype_bits(input_dtype)
+    weight_bits = dtype_bits(weight_dtype)
+    input_frac = dtype_frac(input_dtype)
+    output_bits = dtype_bits(output_dtype)
+    output_frac = dtype_frac(output_dtype)
     model = Sequential(
         [
-            QActivation(quantized_bits(8, 2), name="input_quant", input_shape=(in_features,)),
+            QActivation(quantized_bits(input_bits, input_frac), name="input_quant", input_shape=(in_features,)),
             QDense(
                 out_features,
                 name="dense",
-                kernel_quantizer=quantized_bits(8, 0, alpha=1),
-                bias_quantizer=quantized_bits(8, 2, alpha=1),
+                kernel_quantizer=quantized_bits(weight_bits, 0, alpha=1),
+                bias_quantizer=quantized_bits(output_bits, output_frac, alpha=1),
             ),
-            QActivation(quantized_bits(8, 2), name="output_quant"),
+            QActivation(quantized_bits(output_bits, output_frac), name="output_quant"),
         ]
     )
     model.compile(optimizer="adam", loss="mse")
@@ -68,8 +91,17 @@ def build_dense_aie_model(
     project_name,
     parallelism=None,
     tiling=None,
+    input_dtype="i8",
+    weight_dtype="i8",
+    output_dtype=None,
 ):
-    model = build_dense_model(in_features, out_features)
+    model = build_dense_model(
+        in_features,
+        out_features,
+        input_dtype=input_dtype,
+        weight_dtype=weight_dtype,
+        output_dtype=output_dtype,
+    )
     cfg = hls4ml.utils.config_from_keras_model(model, granularity="name")
     dense_name = next(name for name in cfg["LayerName"] if "dense" in name.lower() or "fc" in name.lower())
     if parallelism:
@@ -229,7 +261,7 @@ def save_bar_csv(output_root, x_values, latencies_ns, metadata_rows):
     for x_value, latency_ns, meta in zip(x_values, latencies_ns, metadata_rows):
         latency_us = "nan" if np.isnan(latency_ns) else f"{latency_ns / 1000.0:.6f}"
         rows.append(
-            f"{x_value},{latency_us},{meta.get('cas_length', '')},{meta.get('cas_num', '')},{meta['tile_m']},{meta['tile_k']},{meta['tile_n']}"
+            f'"{x_value}",{latency_us},{meta.get("cas_length", "")},{meta.get("cas_num", "")},{meta["tile_m"]},{meta["tile_k"]},{meta["tile_n"]}'
         )
     (output_root / "latencies_us.csv").write_text("\n".join(rows) + "\n")
 
