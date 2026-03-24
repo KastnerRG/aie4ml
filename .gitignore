@@ -7,6 +7,7 @@ src/aie4ml.egg*
 tutorials/proj_hls*
 tutorials/proj_aie*
 tutorials/proj_aie_tuned/
+single_layer_scaling/proj_aie*
 tutorials/tutorial_1.executed.ipynb
 scripts/
 *.db
