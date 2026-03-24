@@ -13,25 +13,25 @@ from sweep_utils import (
     source_vitis,
     sweep_factors,
     tagged_output_dir,
-    tuple_labels,
 )
 
 IN_FEATURES = 128
 OUT_FEATURES = 128
 BATCH = 8
 ITERS = 1
-CAS_LENGTH_MAX = 32
-CAS_NUM_MAX = 32
+TILE_M = 4
+TILE_K_MAX = 32
+TILE_N_MAX = 32
 PLATFORM = "xilinx_vek280_base_202520_1"
 VITIS_SETTINGS = os.environ.get("VITIS_SETTINGS", "/tmp/tools/Xilinx/2025.2/Vitis/.settings64-Vitis.sh")
-OUTPUT_ROOT = Path(__file__).resolve().parent / "runs" / "cas_num_len"
+OUTPUT_ROOT = Path(__file__).resolve().parent / "runs" / "tile_k_n"
 RESULTS_ROOT = Path(__file__).resolve().parent / "results"
 
 seed_everything()
 
 
-def measure_point(cas_num, cas_length, output_root, rerun_failed):
-    output_dir = output_root / f"cas_num_{cas_num}_cas_length_{cas_length}"
+def measure_point(tile_n, tile_k, output_root, rerun_failed):
+    output_dir = output_root / f"tile_k_{tile_k}_tile_n_{tile_n}"
     return measure_latency_ns(
         output_dir,
         lambda path: build_dense_aie_model(
@@ -41,8 +41,8 @@ def measure_point(cas_num, cas_length, output_root, rerun_failed):
             ITERS,
             PLATFORM,
             path,
-            "cas_num_len",
-            parallelism={"cas_num": cas_num, "cas_length": cas_length},
+            "tile_k_n",
+            tiling={"tile_m": TILE_M, "tile_k": tile_k, "tile_n": tile_n},
         ),
         IN_FEATURES,
         BATCH,
@@ -50,10 +50,9 @@ def measure_point(cas_num, cas_length, output_root, rerun_failed):
     )
 
 
-def describe_point(cas_num, cas_length, summary, status):
+def describe_point(tile_n, tile_k, summary, status):
     return (
-        f"[{status}] cas_num={cas_num:>2} cas_length={cas_length:>2} "
-        f"tile_out={OUT_FEATURES // cas_num:>3} tile_in={IN_FEATURES // cas_length:>3} "
+        f"[{status}] tile_m={TILE_M:>2} tile_k={tile_k:>2} tile_n={tile_n:>2} "
         f"latency_ns={summary}"
     )
 
@@ -64,14 +63,14 @@ def main():
     parser.add_argument("--rerun-failed", action="store_true")
     args = parser.parse_args()
 
-    cas_lengths = sweep_factors(CAS_LENGTH_MAX)
-    cas_nums = sweep_factors(CAS_NUM_MAX)
-    x_labels = tuple_labels(cas_nums, [OUT_FEATURES // cas_num for cas_num in cas_nums])
-    y_labels = tuple_labels(cas_lengths, [IN_FEATURES // cas_length for cas_length in cas_lengths])
+    tile_ks = sweep_factors(TILE_K_MAX)
+    tile_ns = sweep_factors(TILE_N_MAX)
+    x_labels = [str(tile_n) for tile_n in tile_ns]
+    y_labels = [str(tile_k) for tile_k in tile_ks]
     output_dirs = [
-        args.output_root / f"cas_num_{cas_num}_cas_length_{cas_length}"
-        for cas_length in cas_lengths
-        for cas_num in cas_nums
+        args.output_root / f"tile_k_{tile_k}_tile_n_{tile_n}"
+        for tile_k in tile_ks
+        for tile_n in tile_ns
     ]
 
     args.output_root.mkdir(parents=True, exist_ok=True)
@@ -79,16 +78,16 @@ def main():
         source_vitis(VITIS_SETTINGS)
 
     latencies_ns = run_heatmap_sweep(
-        cas_nums,
-        cas_lengths,
+        tile_ns,
+        tile_ks,
         args.output_root,
         args.rerun_failed,
         measure_point,
         describe_point,
-        lambda latencies: save_heatmap_csv(args.output_root, "cas_len\\cas_num", x_labels, y_labels, latencies),
+        lambda latencies: save_heatmap_csv(args.output_root, "tile_k\\tile_n", x_labels, y_labels, latencies),
     )
-    output_png = RESULTS_ROOT / f"lat_hm__cas_num_len__size_{BATCH}_{IN_FEATURES}_{OUT_FEATURES}.png"
-    plot_heatmap(output_png, x_labels, y_labels, "(cas_num, tile_out_size)", "(cas_len, tile_in_size)", latencies_ns)
+    output_png = RESULTS_ROOT / f"lat_hm__tile_k_n__size_{BATCH}_{IN_FEATURES}_{OUT_FEATURES}.png"
+    plot_heatmap(output_png, x_labels, y_labels, "tile_n", "tile_k", latencies_ns)
 
 
 if __name__ == "__main__":

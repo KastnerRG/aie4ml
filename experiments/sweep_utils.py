@@ -1,0 +1,225 @@
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import hls4ml
+import matplotlib.pyplot as plt
+import numpy as np
+import tensorflow as tf
+from aie4ml.simulation import read_aie_report
+from qkeras import QActivation, QDense, quantized_bits
+from tensorflow.keras.models import Sequential
+
+
+def seed_everything(seed=42):
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+
+
+def source_vitis(vitis_settings):
+    proc = subprocess.run(
+        ["bash", "-lc", f"source {vitis_settings} >/dev/null 2>&1 && env -0"],
+        capture_output=True,
+        check=True,
+    )
+    for entry in proc.stdout.split(b"\x00"):
+        if b"=" in entry:
+            key, value = entry.split(b"=", 1)
+            os.environ[key.decode()] = value.decode()
+    env_prefix = Path(sys.prefix)
+    os.environ["PATH"] = f"{env_prefix / 'bin'}:{os.environ.get('PATH', '')}"
+    os.environ["LD_LIBRARY_PATH"] = f"{env_prefix / 'lib'}:{os.environ.get('LD_LIBRARY_PATH', '')}".rstrip(":")
+
+
+def build_dense_model(in_features, out_features):
+    model = Sequential(
+        [
+            QActivation(quantized_bits(8, 2), name="input_quant", input_shape=(in_features,)),
+            QDense(
+                out_features,
+                name="dense",
+                kernel_quantizer=quantized_bits(8, 0, alpha=1),
+                bias_quantizer=quantized_bits(8, 2, alpha=1),
+            ),
+            QActivation(quantized_bits(8, 2), name="output_quant"),
+        ]
+    )
+    model.compile(optimizer="adam", loss="mse")
+    return model
+
+
+def build_dense_aie_model(
+    in_features,
+    out_features,
+    batch,
+    iterations,
+    platform,
+    output_dir,
+    project_name,
+    parallelism=None,
+    tiling=None,
+):
+    model = build_dense_model(in_features, out_features)
+    cfg = hls4ml.utils.config_from_keras_model(model, granularity="name")
+    dense_name = next(name for name in cfg["LayerName"] if "dense" in name.lower() or "fc" in name.lower())
+    if parallelism:
+        cfg["LayerName"][dense_name]["parallelism"] = {k: int(v) for k, v in parallelism.items()}
+    if tiling:
+        cfg["LayerName"][dense_name]["tiling"] = {k: int(v) for k, v in tiling.items()}
+    aie_model = hls4ml.converters.convert_from_keras_model(
+        model,
+        hls_config=cfg,
+        output_dir=str(output_dir),
+        backend="aie",
+        project_name=project_name,
+        batch_size=batch,
+        iterations=iterations,
+        part=platform,
+    )
+    aie_model.compile()
+    return aie_model
+
+
+def tagged_output_dir(output_root, **tags):
+    return output_root / "_".join(f"{key}_{value}" for key, value in tags.items())
+
+
+def result_path(output_dir):
+    return output_dir / "result.json"
+
+
+def load_result(output_dir):
+    path = result_path(output_dir)
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def save_result(output_dir, status, latency_ns=None, error=None):
+    payload = {"status": status, "latency_ns": latency_ns, "error": error}
+    result_path(output_dir).write_text(json.dumps(payload, indent=2))
+
+
+def failure_summary(output_dir, fallback=None):
+    for name in ["AIECompiler.log", "log"]:
+        path = output_dir / name
+        if not path.exists():
+            continue
+        lines = [line.strip() for line in path.read_text(errors="ignore").splitlines() if line.strip()]
+        for line in reversed(lines):
+            if "ERROR" in line or "Failed" in line or "Compilation Failed" in line:
+                return line
+    return fallback
+
+
+def load_cached_latency_ns(output_dir):
+    result = load_result(output_dir)
+    if result and result["status"] == "success":
+        return float(result["latency_ns"])
+    report = read_aie_report(output_dir)
+    latency = report.get("fifo_latency", {}).get("ns")
+    if latency is not None:
+        save_result(output_dir, "success", latency_ns=float(latency))
+        return float(latency)
+    return None
+
+
+def load_failed_result(output_dir):
+    result = load_result(output_dir)
+    if result and result["status"] == "failed":
+        return result
+    error = failure_summary(output_dir)
+    if error is not None:
+        save_result(output_dir, "failed", error=error)
+        return load_result(output_dir)
+    return None
+
+
+def measure_latency_ns(output_dir, build_aie_model, in_features, batch, rerun_failed=False):
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    latency_ns = load_cached_latency_ns(output_dir)
+    if latency_ns is not None:
+        return latency_ns, "cached"
+
+    if load_failed_result(output_dir) and not rerun_failed:
+        return np.nan, "failed"
+
+    try:
+        aie_model = build_aie_model(output_dir)
+        aie_model.build()
+        x = np.random.random((batch, in_features)).astype(np.float32)
+        aie_model.predict(x, simulator="aie")
+        latency_ns = read_aie_report(aie_model)["fifo_latency"]["ns"]
+        save_result(output_dir, "success", latency_ns=float(latency_ns))
+        return float(latency_ns), "new"
+    except Exception as exc:
+        save_result(output_dir, "failed", error=failure_summary(output_dir, str(exc)))
+        return np.nan, "failed"
+
+
+def sweep_factors(max_factor):
+    factors = []
+    factor = 1
+    while factor <= max_factor:
+        factors.append(factor)
+        factor *= 2
+    return factors
+
+
+def tuple_labels(first_values, second_values):
+    return [f"({first},{second})" for first, second in zip(first_values, second_values)]
+
+
+def save_heatmap_csv(output_root, header, x_labels, y_labels, latencies_ns):
+    np.save(output_root / "latencies_ns.npy", latencies_ns)
+    rows = [",".join([header, *x_labels])]
+    for label, row in zip(y_labels, latencies_ns / 1000.0):
+        values = ["nan" if np.isnan(value) else f"{value:.6f}" for value in row]
+        rows.append(",".join([label, *values]))
+    (output_root / "latencies_us.csv").write_text("\n".join(rows) + "\n")
+
+
+def plot_heatmap(output_png, x_labels, y_labels, x_title, y_title, latencies_ns):
+    latencies_us = latencies_ns / 1000.0
+    masked = np.ma.masked_invalid(latencies_us)
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad("white")
+    fig, ax = plt.subplots(figsize=(9, 5))
+    image = ax.imshow(masked, origin="lower", cmap=cmap)
+    ax.set_xticks(range(len(x_labels)), labels=x_labels)
+    ax.set_yticks(range(len(y_labels)), labels=y_labels)
+    ax.set_xlabel(x_title)
+    ax.set_ylabel(y_title)
+    ax.set_title("Latency Per Inference")
+    for row in range(latencies_us.shape[0]):
+        for col in range(latencies_us.shape[1]):
+            if not np.isnan(latencies_us[row, col]):
+                ax.text(col, row, f"{latencies_us[row, col]:.2f}", ha="center", va="center", color="white")
+    fig.colorbar(image, ax=ax, label="latency (us)")
+    fig.tight_layout()
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_png, dpi=200)
+    plt.show()
+
+
+def run_heatmap_sweep(x_values, y_values, output_root, rerun_failed, measure_point, describe_point, save_progress):
+    latencies = np.full((len(y_values), len(x_values)), np.nan)
+    for row, y_value in enumerate(y_values):
+        for col, x_value in enumerate(x_values):
+            latency_ns, status = measure_point(x_value, y_value, output_root, rerun_failed)
+            latencies[row, col] = latency_ns
+            summary = "nan" if np.isnan(latency_ns) else f"{latency_ns:.3f}"
+            print(describe_point(x_value, y_value, summary, status))
+            save_progress(latencies)
+    return latencies
+
+
+def needs_execution(output_dirs, rerun_failed):
+    for output_dir in output_dirs:
+        if load_cached_latency_ns(output_dir) is not None:
+            continue
+        if load_failed_result(output_dir) and not rerun_failed:
+            continue
+        return True
+    return False
