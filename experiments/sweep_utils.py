@@ -295,6 +295,46 @@ def plot_bar(output_png, x_labels, latencies_ns, x_title, y_title, title):
     plt.show()
 
 
+def plot_overlaid_bars(output_png, x_labels, series, x_title, y_title, title):
+    fig, ax = plt.subplots(figsize=(11, 6))
+    cmap = plt.get_cmap("tab20")
+    colors = {label: cmap(index % cmap.N) for index, (label, _) in enumerate(series)}
+    legend_done = set()
+    max_height = 0.0
+    for x_index in range(len(x_labels)):
+        bars_at_x = []
+        for label, latencies_ns in series:
+            latencies_us = latencies_ns / 1000.0
+            value = float(latencies_us[x_index]) if not np.isnan(latencies_us[x_index]) else np.nan
+            bars_at_x.append((0.0 if np.isnan(value) else value, label, value))
+            if not np.isnan(value):
+                max_height = max(max_height, value)
+        for _, label, value in sorted(bars_at_x, key=lambda item: item[0], reverse=True):
+            bar = ax.bar(
+                [x_index],
+                [0.0 if np.isnan(value) else value],
+                width=0.8,
+                color=colors[label],
+                edgecolor="black",
+                label=label if label not in legend_done else None,
+            )[0]
+            legend_done.add(label)
+            label_text = "fail" if np.isnan(value) else f"{value:.2f}"
+            y = 0.0 if np.isnan(value) else value
+            ax.text(bar.get_x() + bar.get_width() / 2.0, y, label_text, ha="center", va="bottom", fontsize=8)
+    ax.set_xticks(range(len(x_labels)), labels=x_labels, rotation=45, ha="right")
+    ax.set_xlabel(x_title)
+    ax.set_ylabel(y_title)
+    ax.set_title(title)
+    ax.legend(title="layer")
+    if max_height > 0:
+        ax.set_ylim(0, max_height * 1.12)
+    fig.tight_layout()
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_png, dpi=200)
+    plt.show()
+
+
 def plot_heatmap(output_png, x_labels, y_labels, x_title, y_title, latencies_ns):
     latencies_us = latencies_ns / 1000.0
     masked = np.ma.masked_invalid(latencies_us)

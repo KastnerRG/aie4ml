@@ -4,7 +4,19 @@ from pathlib import Path
 
 import numpy as np
 
-from sweep_utils import TILE_API_TILINGS, api_tilings, build_dense_aie_model, default_output_dtype, dtype_bits, measure_latency_ns, needs_execution, plot_bar, save_bar_csv, seed_everything, source_vitis
+from sweep_utils import (
+    TILE_API_TILINGS,
+    api_tilings,
+    build_dense_aie_model,
+    default_output_dtype,
+    dtype_bits,
+    measure_latency_ns,
+    needs_execution,
+    plot_overlaid_bars,
+    save_bar_csv,
+    seed_everything,
+    source_vitis,
+)
 
 BATCH = 8
 LAYER_SHAPES = [(32, 32), (32, 64), (64, 32), (64, 64), (64, 128), (128, 64)]
@@ -20,6 +32,10 @@ DTYPE_PAIRS = [dtype_pair for dtype_pair in TILE_API_TILINGS if dtype_pair != ("
 SKIP_TILINGS = {("i16", "i16"): {(4, 2, 8)}}
 
 seed_everything()
+
+
+def shape_key(shape):
+    return (shape[0] * shape[1], shape[0], shape[1])
 
 
 def main():
@@ -53,14 +69,15 @@ def main():
                 output_root / f"tile_m_{meta['tile_m']}_tile_k_{meta['tile_k']}_tile_n_{meta['tile_n']}_out_{dtype_bits(meta['output_dtype'])}"
                 for meta in metadata_rows
             ]
-            experiments.append((in_features, out_features, input_dtype, weight_dtype, exp_name, output_root, metadata_rows, x_values, output_dirs))
+            experiments.append((in_features, out_features, input_dtype, weight_dtype, dtype_tag, output_root, metadata_rows, x_values, output_dirs))
             all_output_dirs.extend(output_dirs)
 
     if needs_execution(all_output_dirs, args.rerun_failed):
         source_vitis(VITIS_SETTINGS)
 
-    for in_features, out_features, input_dtype, weight_dtype, exp_name, output_root, metadata_rows, x_values, output_dirs in experiments:
-        print(exp_name)
+    plots_by_dtype = {}
+    for in_features, out_features, input_dtype, weight_dtype, dtype_tag, output_root, metadata_rows, x_values, output_dirs in experiments:
+        print(output_root.name)
         output_root.mkdir(parents=True, exist_ok=True)
         latencies_ns = np.full(len(metadata_rows), np.nan)
         for index, meta in enumerate(metadata_rows):
@@ -87,12 +104,40 @@ def main():
             )
             latencies_ns[index] = latency_ns
             summary = "nan" if np.isnan(latency_ns) else f"{latency_ns:.3f}"
-            print(f"[{status}] dt=({input_dtype},{weight_dtype})->{meta['output_dtype']} shape=({BATCH},{in_features},{out_features}) cas_num={CAS_NUM} cas_length={CAS_LENGTH} tile_api={x_values[index]} latency_ns={summary}")
+            print(
+                f"[{status}] dt=({input_dtype},{weight_dtype})->{meta['output_dtype']} "
+                f"shape=({BATCH},{in_features},{out_features}) cas_num={CAS_NUM} cas_length={CAS_LENGTH} "
+                f"tile_api={x_values[index]} latency_ns={summary}"
+            )
             save_bar_csv(output_root, x_values, latencies_ns, metadata_rows)
 
-        title = f"Latency Per Inference, layer=({BATCH},{in_features},{out_features}), dt=({input_dtype},{weight_dtype})->{metadata_rows[0]['output_dtype']}"
-        output_png = RESULTS_ROOT / f"lat_hm__{exp_name}.png"
-        plot_bar(output_png, x_values, latencies_ns, "api tile (M,K,N)", "latency (us)", title)
+        plots_by_dtype.setdefault(
+            dtype_tag,
+            {
+                "input_dtype": input_dtype,
+                "weight_dtype": weight_dtype,
+                "output_dtype": metadata_rows[0]["output_dtype"],
+                "x_values": x_values,
+                "series": [],
+            },
+        )
+        plots_by_dtype[dtype_tag]["series"].append(((in_features, out_features), latencies_ns.copy()))
+
+    for dtype_tag, plot_data in plots_by_dtype.items():
+        ordered_series = [
+            (f"{in_features}x{out_features}", latencies_ns)
+            for (in_features, out_features), latencies_ns in sorted(
+                plot_data["series"],
+                key=lambda item: shape_key(item[0]),
+                reverse=True,
+            )
+        ]
+        title = (
+            f"Latency Per Inference, batch={BATCH}, "
+            f"dt=({plot_data['input_dtype']},{plot_data['weight_dtype']})->{plot_data['output_dtype']}"
+        )
+        output_png = RESULTS_ROOT / f"lat_hm__tile_k_n__size_{BATCH}_shapes__{dtype_tag}.png"
+        plot_overlaid_bars(output_png, plot_data["x_values"], ordered_series, "api tile (M,K,N)", "latency (us)", title)
 
 
 if __name__ == "__main__":
