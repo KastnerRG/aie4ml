@@ -12,7 +12,6 @@ from sweep_utils import (
     seed_everything,
     source_vitis,
     sweep_factors,
-    tagged_output_dir,
     tuple_labels,
 )
 
@@ -20,8 +19,8 @@ IN_FEATURES = 128
 OUT_FEATURES = 128
 BATCH = 8
 ITERS = 1
-CAS_LENGTH_MAX = 32
-CAS_NUM_MAX = 32
+CAS_LENGTH_MAX = 16
+CAS_NUM_MAX = 8
 PLATFORM = "xilinx_vek280_base_202520_1"
 VITIS_SETTINGS = os.environ.get("VITIS_SETTINGS", "/tools/Xilinx/Vivado/2025.2/Vitis/settings64.sh")
 OUTPUT_ROOT = Path(__file__).resolve().parent / "runs" / f"cas_num_len__size_{BATCH}_{IN_FEATURES}_{OUT_FEATURES}"

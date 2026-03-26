@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -108,6 +109,112 @@ def build_dense_aie_model(
         cfg["LayerName"][dense_name]["parallelism"] = {k: int(v) for k, v in parallelism.items()}
     if tiling:
         cfg["LayerName"][dense_name]["tiling"] = {k: int(v) for k, v in tiling.items()}
+    aie_model = hls4ml.converters.convert_from_keras_model(
+        model,
+        hls_config=cfg,
+        output_dir=str(output_dir),
+        backend="aie",
+        project_name=project_name,
+        batch_size=batch,
+        iterations=iterations,
+        part=platform,
+    )
+    aie_model.compile()
+    return aie_model
+
+
+def build_dense_chain_model(
+    in_features,
+    out_features,
+    num_layers,
+    input_dtype="i8",
+    weight_dtype="i8",
+    output_dtype=None,
+):
+    output_dtype = default_output_dtype(input_dtype, weight_dtype) if output_dtype is None else output_dtype
+    input_bits = dtype_bits(input_dtype)
+    weight_bits = dtype_bits(weight_dtype)
+    input_frac = dtype_frac(input_dtype)
+    output_bits = dtype_bits(output_dtype)
+    output_frac = dtype_frac(output_dtype)
+    layers = [QActivation(quantized_bits(input_bits, input_frac), name="input_quant", input_shape=(in_features,))]
+    for index in range(num_layers):
+        layers.append(
+            QDense(
+                out_features,
+                name=f"dense_{index}",
+                kernel_quantizer=quantized_bits(weight_bits, 0, alpha=1),
+                bias_quantizer=quantized_bits(output_bits, output_frac, alpha=1),
+            )
+        )
+        layers.append(QActivation(quantized_bits(output_bits, output_frac), name=f"quant_{index}"))
+    model = Sequential(layers)
+    model.compile(optimizer="adam", loss="mse")
+    return model
+
+
+def configure_dense_chain_cfg(cfg, probe_model, io_mode=None, use_relu=False):
+    layer_cfg = cfg.setdefault("LayerName", {})
+    for layer in probe_model.get_layers():
+        if layer.class_name == "Dense":
+            layer_cfg.setdefault(layer.name, {})["aie_fused_activation"] = "relu" if use_relu else ""
+
+    if io_mode is None:
+        return
+
+    for layer in probe_model.get_layers():
+        if layer.class_name == "Input":
+            continue
+        tensor_routes = {}
+        for source in getattr(layer, "inputs", []):
+            if source not in probe_model.output_vars:
+                continue
+            tensor_name = probe_model.output_vars[source].name
+            tensor_routes[tensor_name] = io_mode
+            producer_cfg = layer_cfg.setdefault(source, {})
+            producer_cfg.setdefault("io_route", {}).setdefault("outputs", {})[tensor_name] = io_mode
+        if tensor_routes:
+            consumer_cfg = layer_cfg.setdefault(layer.name, {})
+            consumer_cfg.setdefault("io_route", {}).setdefault("inputs", {}).update(tensor_routes)
+
+
+
+def build_dense_chain_aie_model(
+    in_features,
+    out_features,
+    num_layers,
+    batch,
+    iterations,
+    platform,
+    output_dir,
+    project_name,
+    io_mode=None,
+    use_relu=False,
+    input_dtype="i8",
+    weight_dtype="i8",
+    output_dtype=None,
+):
+    model = build_dense_chain_model(
+        in_features,
+        out_features,
+        num_layers,
+        input_dtype=input_dtype,
+        weight_dtype=weight_dtype,
+        output_dtype=output_dtype,
+    )
+    cfg = hls4ml.utils.config_from_keras_model(model, granularity="name")
+    with tempfile.TemporaryDirectory(prefix="aie4ml_model_sweep_") as probe_dir:
+        probe_model = hls4ml.converters.convert_from_keras_model(
+            model,
+            hls_config=cfg,
+            output_dir=probe_dir,
+            backend="aie",
+            project_name=f"{project_name}_probe",
+            batch_size=batch,
+            iterations=iterations,
+            part=platform,
+        )
+        configure_dense_chain_cfg(cfg, probe_model, io_mode=io_mode, use_relu=use_relu)
     aie_model = hls4ml.converters.convert_from_keras_model(
         model,
         hls_config=cfg,
@@ -292,7 +399,65 @@ def plot_bar(output_png, x_labels, latencies_ns, x_title, y_title, title):
     fig.tight_layout()
     output_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_png, dpi=200)
-    plt.show()
+    if "agg" not in plt.get_backend().lower():
+        plt.show()
+    plt.close(fig)
+
+
+def save_grouped_bar_csv(output_root, x_values, series):
+    np.savez(output_root / "latencies_ns.npz", **{label: values for label, values in series})
+    header = ["x_value", *[label.replace(" ", "_") + "_us" for label, _ in series]]
+    rows = [",".join(header)]
+    for index, x_value in enumerate(x_values):
+        values = [f'"{x_value}"']
+        for _, latencies_ns in series:
+            value = latencies_ns[index]
+            values.append("nan" if np.isnan(value) else f"{value / 1000.0:.6f}")
+        rows.append(",".join(values))
+    (output_root / "latencies_us.csv").write_text("\n".join(rows) + "\n")
+
+
+def plot_grouped_bars(output_png, x_labels, series, x_title, y_title, title):
+    fig, ax = plt.subplots(figsize=(9, 5))
+    x = np.arange(len(x_labels))
+    width = 0.8 / max(1, len(series))
+    offsets = np.linspace(-(len(series) - 1) * width / 2, (len(series) - 1) * width / 2, len(series))
+    ymax = 0.0
+    colors = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
+    for index, (label, latencies_ns) in enumerate(series):
+        latencies_us = latencies_ns / 1000.0
+        bars = ax.bar(
+            x + offsets[index],
+            np.nan_to_num(latencies_us, nan=0.0),
+            width=width,
+            color=["white" if np.isnan(value) else colors[index % len(colors)] for value in latencies_us],
+            edgecolor="black",
+            label=label,
+        )
+        for bar, value in zip(bars, latencies_us):
+            y = 0.0 if np.isnan(value) else value
+            ymax = max(ymax, y)
+            ax.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                y,
+                "fail" if np.isnan(value) else f"{value:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+    ax.set_xticks(x, labels=x_labels)
+    ax.set_xlabel(x_title)
+    ax.set_ylabel(y_title)
+    ax.set_title(title)
+    ax.legend()
+    if ymax > 0:
+        ax.set_ylim(0, ymax * 1.12)
+    fig.tight_layout()
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_png, dpi=200)
+    if "agg" not in plt.get_backend().lower():
+        plt.show()
+    plt.close(fig)
 
 
 def plot_overlaid_bars(output_png, x_labels, series, x_title, y_title, title):
@@ -332,7 +497,9 @@ def plot_overlaid_bars(output_png, x_labels, series, x_title, y_title, title):
     fig.tight_layout()
     output_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_png, dpi=200)
-    plt.show()
+    if "agg" not in plt.get_backend().lower():
+        plt.show()
+    plt.close(fig)
 
 
 def plot_heatmap(output_png, x_labels, y_labels, x_title, y_title, latencies_ns):
@@ -355,7 +522,9 @@ def plot_heatmap(output_png, x_labels, y_labels, x_title, y_title, latencies_ns)
     fig.tight_layout()
     output_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_png, dpi=200)
-    plt.show()
+    if "agg" not in plt.get_backend().lower():
+        plt.show()
+    plt.close(fig)
 
 
 def run_heatmap_sweep(x_values, y_values, output_root, rerun_failed, measure_point, describe_point, save_progress):
