@@ -5,17 +5,12 @@ from pathlib import Path
 import numpy as np
 
 from sweep_utils import (
-    api_label,
     build_dense_aie_model,
-    gops_per_second,
-    macs_per_inference,
     measure_latency_ns,
     needs_execution,
     save_rows_csv,
     seed_everything,
-    shape_label,
     source_vitis,
-    throughput_fps,
 )
 
 BATCH = 8
@@ -50,6 +45,30 @@ def orientation(in_features, out_features):
 def point_output_dir(output_root, in_features, out_features, tiling):
     tile_m, tile_k, tile_n = tiling
     return output_root / f"b{BATCH}_i{in_features}_o{out_features}_m{tile_m}_k{tile_k}_n{tile_n}"
+
+
+def api_label(tiling):
+    return f"({tiling[0]},{tiling[1]},{tiling[2]})"
+
+
+def shape_label(batch, in_features, out_features):
+    return f"({batch},{in_features},{out_features})"
+
+
+def macs_per_inference(batch, in_features, out_features):
+    return int(batch * in_features * out_features)
+
+
+def gops_per_second(macs, latency_ns):
+    if latency_ns is None or np.isnan(latency_ns) or latency_ns <= 0:
+        return np.nan
+    return (2.0 * macs) / latency_ns
+
+
+def throughput_fps(latency_ns):
+    if latency_ns is None or np.isnan(latency_ns) or latency_ns <= 0:
+        return np.nan
+    return 1e9 / latency_ns
 
 
 def main():

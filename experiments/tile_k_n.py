@@ -2,6 +2,7 @@ import argparse
 import os
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 
 from sweep_utils import (
@@ -12,8 +13,6 @@ from sweep_utils import (
     dtype_bits,
     measure_latency_ns,
     needs_execution,
-    plot_overlaid_bars,
-    save_bar_csv,
     seed_everything,
     source_vitis,
 )
@@ -36,6 +35,57 @@ seed_everything()
 
 def shape_key(shape):
     return (shape[0] * shape[1], shape[0], shape[1])
+
+
+def save_bar_csv(output_root, x_values, latencies_ns, metadata_rows):
+    np.save(output_root / "latencies_ns.npy", latencies_ns)
+    rows = ["x_value,latency_us,cas_length,cas_num,tile_m,tile_k,tile_n"]
+    for x_value, latency_ns, meta in zip(x_values, latencies_ns, metadata_rows):
+        latency_us = "nan" if np.isnan(latency_ns) else f"{latency_ns / 1000.0:.6f}"
+        rows.append(
+            f'"{x_value}",{latency_us},{meta.get("cas_length", "")},{meta.get("cas_num", "")},{meta["tile_m"]},{meta["tile_k"]},{meta["tile_n"]}'
+        )
+    (output_root / "latencies_us.csv").write_text("\n".join(rows) + "\n")
+
+
+def plot_overlaid_bars(output_png, x_labels, series, x_title, y_title, title):
+    fig, ax = plt.subplots(figsize=(11, 6))
+    cmap = plt.get_cmap("tab20")
+    colors = {label: cmap(index % cmap.N) for index, (label, _) in enumerate(series)}
+    legend_done = set()
+    max_height = 0.0
+    for x_index in range(len(x_labels)):
+        bars_at_x = []
+        for label, latencies_ns in series:
+            latencies_us = latencies_ns / 1000.0
+            value = float(latencies_us[x_index]) if not np.isnan(latencies_us[x_index]) else np.nan
+            bars_at_x.append((0.0 if np.isnan(value) else value, label, value))
+            if not np.isnan(value):
+                max_height = max(max_height, value)
+        for _, label, value in sorted(bars_at_x, key=lambda item: item[0], reverse=True):
+            bar = ax.bar(
+                [x_index],
+                [0.0 if np.isnan(value) else value],
+                width=0.8,
+                color=colors[label],
+                edgecolor="black",
+                label=label if label not in legend_done else None,
+            )[0]
+            legend_done.add(label)
+            ax.text(bar.get_x() + bar.get_width() / 2.0, 0.0 if np.isnan(value) else value, "fail" if np.isnan(value) else f"{value:.2f}", ha="center", va="bottom", fontsize=8)
+    ax.set_xticks(range(len(x_labels)), labels=x_labels, rotation=45, ha="right")
+    ax.set_xlabel(x_title)
+    ax.set_ylabel(y_title)
+    ax.set_title(title)
+    ax.legend(title="layer")
+    if max_height > 0:
+        ax.set_ylim(0, max_height * 1.12)
+    fig.tight_layout()
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_png, dpi=200)
+    if "agg" not in plt.get_backend().lower():
+        plt.show()
+    plt.close(fig)
 
 
 def main():
