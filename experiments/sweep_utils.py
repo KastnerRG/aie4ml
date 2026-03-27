@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 import subprocess
@@ -415,6 +416,152 @@ def save_grouped_bar_csv(output_root, x_values, series):
             values.append("nan" if np.isnan(value) else f"{value / 1000.0:.6f}")
         rows.append(",".join(values))
     (output_root / "latencies_us.csv").write_text("\n".join(rows) + "\n")
+
+
+def save_rows_csv(csv_path, rows, fieldnames):
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def load_rows_csv(csv_path):
+    with csv_path.open(newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def api_label(tiling):
+    return f"({tiling[0]},{tiling[1]},{tiling[2]})"
+
+
+def shape_label(batch, in_features, out_features):
+    return f"({batch},{in_features},{out_features})"
+
+
+def macs_per_inference(batch, in_features, out_features):
+    return int(batch * in_features * out_features)
+
+
+def gops_per_second(macs, latency_ns):
+    if latency_ns is None or np.isnan(latency_ns) or latency_ns <= 0:
+        return np.nan
+    return (2.0 * macs) / latency_ns
+
+
+def throughput_fps(latency_ns):
+    if latency_ns is None or np.isnan(latency_ns) or latency_ns <= 0:
+        return np.nan
+    return 1e9 / latency_ns
+
+
+def plot_tile_k_n_eff_lines(output_png, rows, title):
+    fig, ax = plt.subplots(figsize=(10, 5))
+    api_order = [api_label(tiling) for tiling in ((4, 8, 8), (2, 8, 8), (2, 16, 8), (4, 8, 4), (4, 16, 4), (4, 16, 8))]
+    colors = {label: plt.get_cmap("tab10")(index) for index, label in enumerate(api_order)}
+    styles = [
+        ("in>out", ":", "in > out"),
+        ("in<out", "-", "in < out"),
+    ]
+    x_rows = sorted(rows, key=lambda row: int(row["macs"]))
+    x_labels = []
+    x_positions = {}
+    for row in x_rows:
+        macs = int(row["macs"])
+        if macs in x_positions:
+            continue
+        in_features = int(row["in_features"])
+        out_features = int(row["out_features"])
+        left, right = sorted((in_features, out_features))
+        x_positions[macs] = len(x_labels)
+        x_labels.append(f"{macs / 1000.0:.1f}k\n({row['batch']},{left}*{right})")
+    plotted = set()
+    for api in api_order:
+        for orientation, linestyle, suffix in styles:
+            series = [
+                row
+                for row in rows
+                if row["api"] == api and row["orientation"] == orientation and row["status"] == "success"
+            ]
+            if not series:
+                continue
+            series.sort(key=lambda row: x_positions[int(row["macs"])])
+            ax.plot(
+                [x_positions[int(row["macs"])] for row in series],
+                [float(row["gops_per_s"]) for row in series],
+                color=colors[api],
+                linestyle=linestyle,
+                linewidth=3.0 if api == "(4,8,8)" else 1.8,
+                marker="o",
+                label=f"{api} {suffix}" if (api, orientation) not in plotted else None,
+            )
+            plotted.add((api, orientation))
+    ax.set_xticks(range(len(x_labels)), labels=x_labels)
+    ax.set_xlabel("MACs = (batch,in*out)")
+    ax.set_ylabel("efficiency (GOps/s)")
+    ax.set_title(title)
+    ax.legend(ncol=2, fontsize=8)
+    fig.tight_layout()
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_png, dpi=200)
+    if "agg" not in plt.get_backend().lower():
+        plt.show()
+    plt.close(fig)
+
+
+def plot_tile_k_n_eff_heatmap(output_png, rows, title):
+    ordered_rows = sorted(rows, key=lambda row: (int(row["macs"]), 0 if row["orientation"] == "in>out" else 1, row["shape"]))
+    x_labels = []
+    seen_shapes = set()
+    for row in ordered_rows:
+        if row["shape"] not in seen_shapes:
+            x_labels.append(row["shape"])
+            seen_shapes.add(row["shape"])
+    y_labels = [api_label(tiling) for tiling in ((4, 8, 8), (2, 8, 8), (2, 16, 8), (4, 8, 4), (4, 16, 4), (4, 16, 8))]
+    values = np.full((len(y_labels), len(x_labels)), np.nan)
+    x_index = {label: index for index, label in enumerate(x_labels)}
+    y_index = {label: index for index, label in enumerate(y_labels)}
+    for row in rows:
+        if row["status"] != "success":
+            continue
+        values[y_index[row["api"]], x_index[row["shape"]]] = float(row["gops_per_s"])
+    masked = np.ma.masked_invalid(values)
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad("white")
+    fig, ax = plt.subplots(figsize=(12, 4.8))
+    image = ax.imshow(masked, origin="lower", aspect="auto", cmap=cmap)
+    ax.set_xticks(range(len(x_labels)), labels=x_labels, rotation=45, ha="right")
+    ax.set_yticks(range(len(y_labels)), labels=y_labels)
+    ax.set_xlabel("layer shape (batch,in,out)")
+    ax.set_ylabel("api tile (M,K,N)")
+    ax.set_title(title)
+    finite_values = values[np.isfinite(values)]
+    vmax = float(finite_values.max()) if finite_values.size else 0.0
+    for row in range(values.shape[0]):
+        for col in range(values.shape[1]):
+            if not np.isnan(values[row, col]):
+                color = "black" if vmax and values[row, col] >= 0.6 * vmax else "white"
+                ax.text(col, row, f"{values[row, col]:.2f}", ha="center", va="center", color=color, fontsize=8)
+    box_linewidth = 3
+    y0 = -0.5
+    y1 = len(y_labels) - 0.5
+    boundaries = {-0.5, len(x_labels) - 0.5}
+    for start_col in range(0, len(x_labels), 2):
+        width = min(2, len(x_labels) - start_col)
+        x0 = start_col - 0.5
+        x1 = start_col + width - 0.5
+        ax.plot([x0, x1], [y0, y0], color="black", linewidth=box_linewidth)
+        ax.plot([x0, x1], [y1, y1], color="black", linewidth=box_linewidth)
+        boundaries.update([x0, x1])
+    for x in sorted(boundaries):
+        ax.plot([x, x], [y0, y1], color="black", linewidth=box_linewidth)
+    fig.colorbar(image, ax=ax, label="efficiency (GOps/s)")
+    fig.tight_layout()
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_png, dpi=200)
+    if "agg" not in plt.get_backend().lower():
+        plt.show()
+    plt.close(fig)
 
 
 def plot_grouped_bars(output_png, x_labels, series, x_title, y_title, title):
