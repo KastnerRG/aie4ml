@@ -30,7 +30,7 @@ def plot_tile_k_n_eff_heatmap(output_png, rows, title):
     masked = np.ma.masked_invalid(values)
     cmap = plt.get_cmap("viridis").copy()
     cmap.set_bad("white")
-    fig, ax = plt.subplots(figsize=(12, 4.8))
+    fig, ax = plt.subplots(figsize=(16, 4.8))
     image = ax.imshow(masked, origin="lower", aspect="auto", cmap=cmap)
     ax.set_xticks(range(len(x_labels)), labels=x_labels, rotation=45, ha="right")
     ax.set_yticks(range(len(y_labels)), labels=y_labels)

@@ -21,6 +21,8 @@ CAS_NUM = 1
 CAS_LENGTH = 1
 ITERS = 1
 T_VALUES = range(3, 9)
+BASE_SHAPES = [(16 * t, 32) for t in T_VALUES]
+EXTENDED_SHAPES = [(dim, 128) for dim in range(48, 129, 16)]
 API_TILINGS = [(4, 8, 8), (2, 8, 8), (2, 16, 8), (4, 8, 4), (4, 16, 4), (4, 16, 8)]
 PLATFORM = "xilinx_vek280_base_202520_1"
 VITIS_SETTINGS = os.environ.get("VITIS_SETTINGS", "/tools/Xilinx/Vivado/2025.2/Vitis/settings64.sh")
@@ -32,9 +34,10 @@ seed_everything()
 
 def shape_pairs():
     pairs = []
-    for t in T_VALUES:
-        other_dim = 16 * t
-        pairs.extend([(other_dim, 32), (32, other_dim)])
+    for in_features, out_features in [*BASE_SHAPES, *EXTENDED_SHAPES]:
+        pairs.append((in_features, out_features))
+        if in_features != out_features:
+            pairs.append((out_features, in_features))
     return pairs
 
 

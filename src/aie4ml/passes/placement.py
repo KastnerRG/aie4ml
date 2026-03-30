@@ -300,11 +300,13 @@ class PlaceKernels(ModelOptimizerPass):
         ctx = get_backend_context(model)
         device = ctx.device
 
-        # local coordinates: [0 .. W-1], [0 .. H-1]
-        W = int(device.columns)
-        H = int(device.rows)
         col_offset = int(device.column_start)
         row_offset = int(device.row_start)
+        # Work in the usable local subgrid, then translate back to absolute
+        # device coordinates. For VEK280, for example, legal AIE columns are
+        # [ColumnStart .. Columns-1], not [ColumnStart .. ColumnStart+Columns-1].
+        W = max(1, int(device.columns) - col_offset)
+        H = max(1, int(device.rows) - row_offset)
 
         kernel_nodes = [(node, ctx.ir.kernels.get(node.name)) for node in ctx.ir.logical]
         kernel_nodes = [(node, inst) for node, inst in kernel_nodes if inst]
